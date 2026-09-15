@@ -31,6 +31,11 @@ where
 {
     #[tracing_attributes::instrument]
     async fn handle(&self, args: CommandContext<Storage, User>) -> Result<Reply, ControlChanError> {
+        if !args.appe_enabled {
+            // GradeX patch: write-once servers refuse appends outright instead of
+            // handing the back-end an ambiguous `put(start_pos)`.
+            return Ok(Reply::new(ReplyCode::CommandNotImplemented, "APPE is not supported by this server"));
+        }
         let mut session = args.session.lock().await;
 
         let (cmd, path): (DataChanCmd, String) = match args.parsed_command.clone() {

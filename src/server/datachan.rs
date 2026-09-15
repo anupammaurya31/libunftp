@@ -112,8 +112,26 @@ where
         // TODO: Use configured timeout
         tokio::select! {
             Some(command) = data_cmd_rx.recv() => {
-                let session = session_arc.lock().await;
-                self.handle_incoming(DataChanMsg::ExternalCommand(command), session.start_pos).await;
+                // GradeX patch: never hold the session lock across the transfer —
+                // control-channel handlers (ABOR, NOOP, ...) need it while we run.
+                let start_pos = {
+                    let session = session_arc.lock().await;
+                    session.start_pos
+                };
+                let logger = self.logger.clone();
+                let tx = self.control_msg_tx.clone();
+                tokio::select! {
+                    _ = self.handle_incoming(DataChanMsg::ExternalCommand(command), start_pos) => {},
+                    Some(_) = data_abort_rx.recv() => {
+                        // GradeX patch: ABOR cancels an in-flight transfer. Dropping the
+                        // future drops the data socket; the storage back-end must not
+                        // commit partial data. Reply 426 for the aborted transfer.
+                        slog::info!(logger, "Data channel transfer cancelled by ABOR");
+                        if let Err(err) = tx.send(ControlChanMsg::ConnectionReset).await {
+                            slog::warn!(logger, "Could not notify control channel of ABOR: {:?}", err);
+                        }
+                    }
+                }
             },
             Some(_) = data_abort_rx.recv() => {
                 self.handle_incoming(DataChanMsg::Abort, 0).await;
@@ -169,7 +187,16 @@ where
         let path_copy = path.clone();
         let path = self.cwd.join(path);
         let tx: Sender<ControlChanMsg> = self.control_msg_tx.clone();
-        let mut output = Self::writer(self.socket, self.ftps_mode, "retr").await;
+        let mut output = match Self::writer(self.socket, self.ftps_mode, "retr").await {
+            Ok(io) => io,
+            Err(err) => {
+                slog::warn!(self.logger, "Data channel TLS handshake failed for RETR: {:?}", err);
+                if let Err(err) = tx.send(ControlChanMsg::ConnectionReset).await {
+                    slog::warn!(self.logger, "Could not notify control channel of data channel failure: {:?}", err);
+                }
+                return;
+            }
+        };
 
         let start_time = Instant::now();
         let result = self.storage.get_into((*self.user).as_ref().unwrap(), path, start_pos, &mut output).await;
@@ -263,12 +290,23 @@ where
         let path = self.cwd.join(path);
         let tx = self.control_msg_tx.clone();
 
+        let reader = match Self::reader(self.socket, self.ftps_mode, "stor").await {
+            Ok(io) => io,
+            Err(err) => {
+                slog::warn!(self.logger, "Data channel TLS handshake failed for STOR: {:?}", err);
+                if let Err(err) = tx.send(ControlChanMsg::ConnectionReset).await {
+                    slog::warn!(self.logger, "Could not notify control channel of data channel failure: {:?}", err);
+                }
+                return;
+            }
+        };
+
         let start_time = Instant::now();
         let put_result = self
             .storage
             .put(
                 (*self.user).as_ref().unwrap(),
-                Self::reader(self.socket, self.ftps_mode, "stor").await,
+                reader,
                 path,
                 start_pos,
             )
@@ -323,12 +361,23 @@ where
             Err(_) => 0,
         };
 
+        let reader = match Self::reader(self.socket, self.ftps_mode, "appe").await {
+            Ok(io) => io,
+            Err(err) => {
+                slog::warn!(self.logger, "Data channel TLS handshake failed for APPE: {:?}", err);
+                if let Err(err) = tx.send(ControlChanMsg::ConnectionReset).await {
+                    slog::warn!(self.logger, "Could not notify control channel of data channel failure: {:?}", err);
+                }
+                return;
+            }
+        };
+
         let start_time = Instant::now();
         let put_result = self
             .storage
             .put(
                 (*self.user).as_ref().unwrap(),
-                Self::reader(self.socket, self.ftps_mode, "appe").await,
+                reader,
                 full_path,
                 start_pos,
             )
@@ -369,7 +418,16 @@ where
     async fn exec_list_variant(self, path: Option<String>, command: ListCommand) {
         let path = self.resolve_path(path);
         let tx = self.control_msg_tx.clone();
-        let mut output = Self::writer(self.socket, self.ftps_mode.clone(), command.as_lower_str()).await;
+        let mut output = match Self::writer(self.socket, self.ftps_mode.clone(), command.as_lower_str()).await {
+            Ok(io) => io,
+            Err(err) => {
+                slog::warn!(self.logger, "Data channel TLS handshake failed for LIST: {:?}", err);
+                if let Err(err) = tx.send(ControlChanMsg::ConnectionReset).await {
+                    slog::warn!(self.logger, "Could not notify control channel of data channel failure: {:?}", err);
+                }
+                return;
+            }
+        };
 
         let start_time = Instant::now();
 
@@ -457,7 +515,16 @@ where
     async fn exec_mlsd(self, path: Option<String>) {
         let path = self.resolve_path(path);
         let tx = self.control_msg_tx.clone();
-        let mut output = Self::writer(self.socket, self.ftps_mode.clone(), "mlsd").await;
+        let mut output = match Self::writer(self.socket, self.ftps_mode.clone(), "mlsd").await {
+            Ok(io) => io,
+            Err(err) => {
+                slog::warn!(self.logger, "Data channel TLS handshake failed for MLSD: {:?}", err);
+                if let Err(err) = tx.send(ControlChanMsg::ConnectionReset).await {
+                    slog::warn!(self.logger, "Could not notify control channel of data channel failure: {:?}", err);
+                }
+                return;
+            }
+        };
 
         let start_time = Instant::now();
 
@@ -549,35 +616,39 @@ where
     }
 
     #[tracing_attributes::instrument]
-    async fn writer(socket: TcpStream, ftps_mode: FtpsConfig, command: &'static str) -> Box<dyn AsyncWrite + Send + Unpin + Sync> {
+    async fn writer(socket: TcpStream, ftps_mode: FtpsConfig, command: &'static str) -> std::io::Result<Box<dyn AsyncWrite + Send + Unpin + Sync>> {
         match ftps_mode {
-            FtpsConfig::Off => Box::new(MeasuringWriter::new(socket, command)) as Box<dyn AsyncWrite + Send + Unpin + Sync>,
+            FtpsConfig::Off => Ok(Box::new(MeasuringWriter::new(socket, command)) as Box<dyn AsyncWrite + Send + Unpin + Sync>),
             FtpsConfig::Building { .. } => panic!("Illegal state"),
             FtpsConfig::On { tls_config } => {
                 let io = async move {
                     let acceptor: TlsAcceptor = tls_config.into();
-                    let tls_stream = acceptor.accept(socket).await.unwrap();
-                    MeasuringWriter::new(tls_stream, command)
+                    // GradeX patch: a failed data-channel handshake is a client error,
+                    // not a reason to panic the data task.
+                    let tls_stream = acceptor.accept(socket).await?;
+                    Ok::<_, std::io::Error>(MeasuringWriter::new(tls_stream, command))
                 }
-                .await;
-                Box::new(io) as Box<dyn AsyncWrite + Send + Unpin + Sync>
+                .await?;
+                Ok(Box::new(io) as Box<dyn AsyncWrite + Send + Unpin + Sync>)
             }
         }
     }
 
     #[tracing_attributes::instrument]
-    async fn reader(socket: TcpStream, ftps_mode: FtpsConfig, command: &'static str) -> Box<dyn AsyncRead + Send + Unpin + Sync> {
+    async fn reader(socket: TcpStream, ftps_mode: FtpsConfig, command: &'static str) -> std::io::Result<Box<dyn AsyncRead + Send + Unpin + Sync>> {
         match ftps_mode {
-            FtpsConfig::Off => Box::new(MeasuringReader::new(socket, command)) as Box<dyn AsyncRead + Send + Unpin + Sync>,
+            FtpsConfig::Off => Ok(Box::new(MeasuringReader::new(socket, command)) as Box<dyn AsyncRead + Send + Unpin + Sync>),
             FtpsConfig::Building { .. } => panic!("Illegal state"),
             FtpsConfig::On { tls_config } => {
                 let io = async move {
                     let acceptor: TlsAcceptor = tls_config.into();
-                    let tls_stream = acceptor.accept(socket).await.unwrap();
-                    MeasuringReader::new(tls_stream, command)
+                    // GradeX patch: a failed data-channel handshake is a client error,
+                    // not a reason to panic the data task.
+                    let tls_stream = acceptor.accept(socket).await?;
+                    Ok::<_, std::io::Error>(MeasuringReader::new(tls_stream, command))
                 }
-                .await;
-                Box::new(io) as Box<dyn AsyncRead + Send + Unpin + Sync>
+                .await?;
+                Ok(Box::new(io) as Box<dyn AsyncRead + Send + Unpin + Sync>)
             }
         }
     }

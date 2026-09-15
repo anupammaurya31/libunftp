@@ -72,6 +72,7 @@ where
     listener_mode: ListenerMode,
     logger: slog::Logger,
     site_md5: SiteMd5,
+    appe_enabled: bool,
     shutdown: Pin<Box<dyn Future<Output = options::Shutdown> + Send + Sync>>,
     failed_logins_policy: Option<FailedLoginsPolicy>,
     active_passive_mode: ActivePassiveMode,
@@ -105,6 +106,7 @@ where
     listener_mode: ListenerMode,
     logger: slog::Logger,
     site_md5: SiteMd5,
+    appe_enabled: bool,
     shutdown: Pin<Box<dyn Future<Output = options::Shutdown> + Send + Sync>>,
     failed_logins_policy: Option<FailedLoginsPolicy>,
     active_passive_mode: ActivePassiveMode,
@@ -154,6 +156,7 @@ where
             ftps_client_auth: FtpsClientAuth::default(),
             ftps_trust_store: options::DEFAULT_FTPS_TRUST_STORE.into(),
             site_md5: SiteMd5::default(),
+            appe_enabled: true,
             shutdown: Box::pin(futures_util::future::pending()),
             failed_logins_policy: None,
             active_passive_mode: ActivePassiveMode::default(),
@@ -217,6 +220,7 @@ where
             listener_mode: self.listener_mode,
             logger: self.logger,
             site_md5: self.site_md5,
+            appe_enabled: self.appe_enabled,
             shutdown: self.shutdown,
             failed_logins_policy: self.failed_logins_policy,
             active_passive_mode: self.active_passive_mode,
@@ -273,6 +277,7 @@ where
             ftps_client_auth: FtpsClientAuth::default(),
             ftps_trust_store: options::DEFAULT_FTPS_TRUST_STORE.into(),
             site_md5: SiteMd5::default(),
+            appe_enabled: true,
             shutdown: Box::pin(futures_util::future::pending()),
             failed_logins_policy: None,
             active_passive_mode: ActivePassiveMode::default(),
@@ -351,6 +356,7 @@ where
             listener_mode: self.listener_mode,
             logger: self.logger,
             site_md5: self.site_md5,
+            appe_enabled: self.appe_enabled,
             shutdown: self.shutdown,
             failed_logins_policy: self.failed_logins_policy,
             active_passive_mode: self.active_passive_mode,
@@ -750,6 +756,25 @@ where
         self
     }
 
+    /// Enables or disables the `APPE` (append) command. When disabled the
+    /// server replies `502`; useful for write-once back-ends that neither
+    /// resume nor append (GradeX patch). Enabled by default.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use libunftp::ServerBuilder;
+    /// use unftp_sbe_fs::Filesystem;
+    ///
+    /// let server = ServerBuilder::new(Box::new(|| Filesystem::new("/tmp").unwrap()))
+    ///     .appe(false)
+    ///     .build();
+    /// ```
+    pub fn appe(mut self, enabled: bool) -> Self {
+        self.appe_enabled = enabled;
+        self
+    }
+
     /// Assign a connection helper to the server.
     ///
     /// Rather than listening for and servicing connections in the same binary, this option allows
@@ -977,6 +1002,7 @@ where
             ftps_required_control_chan: server.ftps_required_control_chan,
             ftps_required_data_chan: server.ftps_required_data_chan,
             site_md5: server.site_md5,
+            appe_enabled: server.appe_enabled,
             data_listener: server.data_listener.clone(),
             presence_listener: server.presence_listener.clone(),
             active_passive_mode: server.active_passive_mode,

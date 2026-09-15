@@ -67,6 +67,7 @@ where
     pub ftps_required_control_chan: FtpsRequired,
     pub ftps_required_data_chan: FtpsRequired,
     pub site_md5: SiteMd5,
+    pub appe_enabled: bool,
     pub data_listener: Arc<dyn DataListener>,
     pub presence_listener: Arc<dyn PresenceListener>,
     pub active_passive_mode: ActivePassiveMode,
@@ -100,6 +101,7 @@ where
         idle_session_timeout,
         logger,
         site_md5: sitemd5,
+        appe_enabled,
         data_listener,
         presence_listener,
         active_passive_mode,
@@ -139,6 +141,7 @@ where
         storage_features,
         tx_proxy_loop: switchboard_msg_tx.clone(),
         sitemd5,
+        appe_enabled,
     };
 
     let event_chain = EventDispatcherMiddleware::new(data_listener, presence_listener, event_chain);
@@ -337,6 +340,7 @@ where
     storage_features: u32,
     tx_proxy_loop: Option<SwitchboardSender<Storage, User>>,
     sitemd5: SiteMd5,
+    appe_enabled: bool,
 }
 
 impl<Storage, User> PrimaryEventHandler<Storage, User>
@@ -428,6 +432,7 @@ where
             tx_prebound_loop: self.tx_proxy_loop.clone(),
             logger: self.logger.clone(),
             sitemd5: self.sitemd5,
+            appe_enabled: self.appe_enabled,
         };
 
         let handler: Box<dyn CommandHandler<Storage, User>> = match cmd {

@@ -44,4 +44,5 @@ where
     pub tx_prebound_loop: Option<SwitchboardSender<Storage, User>>,
     pub logger: slog::Logger,
     pub sitemd5: SiteMd5,
+    pub appe_enabled: bool,
 }
