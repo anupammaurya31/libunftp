@@ -7,7 +7,6 @@
 use crate::{
     auth::UserDetail,
     server::{
-        chancomms::ControlChanMsg,
         controlchan::{
             Reply, ReplyCode,
             error::ControlChanError,
@@ -45,17 +44,14 @@ where
 {
     #[tracing_attributes::instrument]
     async fn handle(&self, args: CommandContext<Storage, User>) -> Result<Reply, ControlChanError> {
-        let tx = args.tx_control_chan.clone();
-        let logger = args.logger;
         match (args.tls_configured, self.protocol.clone()) {
-            (true, AuthParam::Tls) => {
-                tokio::spawn(async move {
-                    if let Err(err) = tx.send(ControlChanMsg::SecureControlChannel).await {
-                        slog::warn!(logger, "AUTH: Could not send internal message to notify of TLS upgrade: {}", err);
-                    }
-                });
-                Ok(Reply::new(ReplyCode::AuthOkayNoDataNeeded, "Upgrading to TLS"))
-            }
+            // GradeX patch: the control loop upgrades the connection itself,
+            // right after this reply goes out and before it reads the socket
+            // again. The upgrade used to be requested from a spawned task, so
+            // a client that started its TLS handshake at once could have its
+            // ClientHello read as a command first (a Utf8Error and a dropped
+            // connection, about one connection in 25 on loopback).
+            (true, AuthParam::Tls) => Ok(Reply::new(ReplyCode::AuthOkayNoDataNeeded, "Upgrading to TLS")),
             (true, AuthParam::Ssl) => Ok(Reply::new(ReplyCode::CommandNotImplementedForParameter, "Auth SSL not implemented")),
             (false, _) => Ok(Reply::new(ReplyCode::CommandNotImplemented, "TLS/SSL not configured")),
         }

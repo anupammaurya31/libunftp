@@ -13,7 +13,7 @@ use crate::{
             auth::AuthMiddleware,
             codecs::FtpCodec,
             command::Command,
-            commands,
+            commands::{self, AuthParam},
             error::ControlChanError,
             error::ControlChanErrorKind,
             ftps::{FtpsControlChanEnforcerMiddleware, FtpsDataChanEnforcerMiddleware},
@@ -189,8 +189,13 @@ where
     let jh = tokio::spawn(async move {
         // The control channel event loop
         slog::info!(logger, "Starting control loop");
+        // An event to handle before the socket is read again: the TLS upgrade
+        // after a successful AUTH TLS (GradeX patch, see commands/auth.rs).
+        let mut next_event: Option<Event> = None;
         loop {
-            let incoming = {
+            let incoming = if let Some(event) = next_event.take() {
+                Some(Ok(event))
+            } else {
                 #[allow(unused_assignments)]
                 let mut incoming = None;
                 let mut timeout_delay = Box::pin(tokio::time::sleep(idle_session_timeout));
@@ -279,9 +284,24 @@ where
 
                     // TODO: Handle Event::InternalMsg(InternalMsg::PlaintextControlChannel)
 
+                    let auth_tls = matches!(&event, Event::Command(Command::Auth { protocol: AuthParam::Tls }));
                     let handle_result = match event_chain.handle(event).await {
                         Err(e) => Err(e),
-                        Ok(reply) => reply_sink.send(reply).await,
+                        Ok(reply) => {
+                            // 234 sent: upgrade before anything else is read.
+                            if auth_tls
+                                && matches!(
+                                    &reply,
+                                    Reply::CodeAndMsg {
+                                        code: ReplyCode::AuthOkayNoDataNeeded,
+                                        ..
+                                    }
+                                )
+                            {
+                                next_event = Some(Event::InternalMsg(ControlChanMsg::SecureControlChannel));
+                            }
+                            reply_sink.send(reply).await
+                        }
                     };
 
                     if let Err(chan_err) = handle_result {
